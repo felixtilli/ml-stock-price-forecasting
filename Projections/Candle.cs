@@ -1,6 +1,6 @@
 ﻿using Alpaca.Markets;
 
-namespace MLStockPriceForecasting.Models;
+namespace MLStockPriceForecasting.Projections;
 
 public class Candle
 {

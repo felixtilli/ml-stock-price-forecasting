@@ -1,4 +1,4 @@
-﻿namespace MLStockPriceForecasting.Models;
+﻿namespace MLStockPriceForecasting.Projections;
 
 public class ForecastOutput
 {
