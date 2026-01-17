@@ -9,9 +9,10 @@ using MLStockPriceForecasting.Projections;
 
 async Task GetCandles(string symbol)
 {
-    Console.WriteLine("Fetching...");
-    var fromDate = DateTime.Now.AddYears(-10);
-    var toDate = DateTime.Now.AddMinutes(-16);
+    Console.WriteLine("Fetching candles for " + symbol + "...");
+    var now = DateTime.Now;
+    var fromDate = now.AddYears(-10);
+    var toDate = now.AddMinutes(-16);
 
     using (var db = new AppDbContext())
     {
@@ -24,6 +25,11 @@ async Task GetCandles(string symbol)
         {
             fromDate = latestValue.Date.AddDays(1);
         }
+    }
+
+    if (fromDate >= now)
+    {
+        return;
     }
 
     var config = new ConfigurationBuilder().AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: false, reloadOnChange: true).Build();
@@ -41,8 +47,6 @@ async Task GetCandles(string symbol)
     } while (request.Pagination.Token is not null);
 
     await SaveValues(symbol, result);
-
-    Console.WriteLine("Fetching done.");
 }
 
 async Task SaveValues(string symbol, List<Candle> candles)
@@ -272,7 +276,7 @@ string FormatResult(string methodName, float prediction, float previousValue)
 
 async Task Predict(string symbol)
 {
-    Console.WriteLine("Predicting...");
+    Console.WriteLine("Predicting " + symbol + "...");
     var candles = new List<Candle>();
     var datesToPredict = new List<DateTime>();
 
@@ -319,9 +323,15 @@ async Task Predict(string symbol)
             continue;
         }
 
-        var ssaResult = await ForecastBySsa(symbol, date, relevantCandles);
-        var regressionLagResult = await ForecastByRegressionLag(symbol, date, relevantCandles);
-        var treeResult = await ForecastByTree(symbol, date, relevantCandles);
+        var ssaTask = ForecastBySsa(symbol, date, relevantCandles);
+        var regressionLagTask = ForecastByRegressionLag(symbol, date, relevantCandles);
+        var treeTask = ForecastByTree(symbol, date, relevantCandles);
+
+        await Task.WhenAll(ssaTask, regressionLagTask, treeTask);
+
+        var ssaResult = ssaTask.Result;
+        var regressionLagResult = regressionLagTask.Result;
+        var treeResult = treeTask.Result;
         var combinedResult = (ssaResult + regressionLagResult + treeResult) / 3;
         var lastValue = relevantCandles.LastOrDefault().Close;
 
@@ -334,74 +344,83 @@ async Task Predict(string symbol)
             FormatResult("Combined", combinedResult, lastValue)
         );
     }
-
-    Console.WriteLine("Predicting done.");
 }
 
 async Task AnalyzePredicitons(string symbol)
 {
-    Console.WriteLine("Analyzing predictions...");
+    Console.WriteLine("Analyzing predictions for " + symbol + "...");
 
     using (var db = new AppDbContext())
     {
-        var values = await db.Values.Where(x => x.Stock.Symbol == symbol).ToListAsync();
-        var strategies = await db.ForecastingStrategies.ToListAsync();
+        var predicitons = await db.Forecasts
+            .Where(x =>
+                x.Stock.Symbol == symbol &&
+                !db.ForecastResults.Any(fr => fr.ForecastId == x.Id)
+            )
+            .ToListAsync();
 
-        foreach (var strategy in strategies)
+        if (!predicitons.Any())
         {
-            var predictions = await db.Forecasts.Where(x => x.Stock.Symbol == symbol && x.ForecastingStrategyId == strategy.Id && x.Date > DateTime.Now.AddYears(-1)).ToListAsync();
+            return;
+        }
 
-            if (!predictions.Any())
+        var values = await db.Values
+            .Where(x =>
+                x.Stock.Symbol == symbol
+            )
+            .ToListAsync();
+
+        if (!values.Any())
+        {
+            return;
+        }
+
+        foreach (var prediction in predicitons)
+        {
+            var previousValue = values.FirstOrDefault(x => x.Date == prediction.Date);
+            if (previousValue == null)
             {
                 continue;
             }
-
-            var totalPredictions = 0;
-            var correctPredictions = 0;
-
-            foreach (var prediction in predictions)
-            {
-                var previousValue = values.FirstOrDefault(x => x.Date == prediction.Date.AddDays(-1));
-                if (previousValue == null)
-                {
-                    continue;
-                }
-
-                var predicitionWasPositive = prediction.ClosePrice > previousValue.Close;
-
-                var nextValue = values.FirstOrDefault(x => x.Date == prediction.Date);
-                if (nextValue == null)
-                {
-                    continue;
-                }
-
-                var outComeWasPositive = nextValue.Close > previousValue.Close;
-
-                if ((predicitionWasPositive && outComeWasPositive) || (!predicitionWasPositive && !outComeWasPositive))
-                {
-                    correctPredictions++;
-                }
-
-                totalPredictions++;
-            }
-
-            if (totalPredictions == 0)
+            var nextValue = values.FirstOrDefault(x => x.Date == prediction.Date.AddDays(1));
+            if (nextValue == null)
             {
                 continue;
             }
-
-            double percentage = totalPredictions == 0 ? 0 : (double)correctPredictions / totalPredictions * 100;
-
-            Console.WriteLine(strategy.Name + ": " + (Math.Round(percentage, 2)).ToString() + "%.");
+            var predicitionWasPositive = prediction.ClosePrice > previousValue.Close;
+            var outComeWasPositive = nextValue.Close > previousValue.Close;
+            var forecastResult = new ForecastResult
+            {
+                ForecastId = prediction.Id,
+                DirectionCorrect = (predicitionWasPositive && outComeWasPositive) || (!predicitionWasPositive && !outComeWasPositive),
+                Diff = Math.Abs(prediction.ClosePrice - nextValue.Close)
+            };
+            db.ForecastResults.Add(forecastResult);
+            await db.SaveChangesAsync();
         }
     }
-
-    Console.WriteLine("Analyzing done.");
 }
 
-var symbol = "LODE";
-await GetCandles(symbol);
-await Predict(symbol);
-await AnalyzePredicitons(symbol);
+var symbols = new List<string>();
 
+using (var db = new AppDbContext())
+{
+    symbols = db.Stocks.Select(s => s.Symbol).ToList();
+}
+
+foreach (var symbol in symbols)
+{
+    try
+    {
+        await GetCandles(symbol);
+        await Predict(symbol);
+        await AnalyzePredicitons(symbol);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error fetching candles for {symbol}: {ex.Message}");
+    }
+}
+
+Console.WriteLine("Done.");
 Console.ReadLine();

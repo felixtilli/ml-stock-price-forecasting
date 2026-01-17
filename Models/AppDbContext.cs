@@ -8,6 +8,7 @@ public class AppDbContext : DbContext
     public DbSet<ForecastingStrategy> ForecastingStrategies { get; set; }
     public DbSet<Forecast> Forecasts { get; set; }
     public DbSet<Value> Values { get; set; }
+    public DbSet<ForecastResult> ForecastResults { get; set; }
 
     protected override void OnConfiguring(DbContextOptionsBuilder options)
     {
